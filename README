@@ -1,0 +1,16 @@
+This is Another Free Implementation of Heating Element Thermostat e.g.
+    Honeywell Rondostat - HR20(e)
+    Aldi - Thermy Energiespar-Regler für Heizkörper
+    EUROtronic - SPARmatic Basic
+    EUROtronic - SPARmatic Zero
+
+this project is not autonomous.
+It relies on the ethersex implementation as the necessary basis.
+Before going on with this project please download ethersex first.
+
+If it doesn't work, you might want to write an e-mail to
+<hr20@keyb.de>
+
+Have fun!
+    kiwi
+
