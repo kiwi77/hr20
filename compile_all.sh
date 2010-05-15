@@ -21,7 +21,15 @@ if test ! -z "${HR20ipAddress}" ; then
 	echo "bootloader" | socat stdio tcp4:10.40.1.31:2701
 fi
 if test ! -z "${ZBusGatewayIP}" ; then
-	../zbusloader/contrib/zbusloader -H ${ZBusGatewayIP} -f ../ethersex/ethersex.bin
+	while true ; do
+		../zbusloader/contrib/zbusloader -t 5 -H ${ZBusGatewayIP} -f ../ethersex/ethersex.bin ; Error=$?
+		if [ ${Error} = 0 ] ; then break ; fi
+		if test ! -z "${HR20ipAddress}" ; then
+			echo "bootloader" | socat stdio tcp4:10.40.1.31:2701
+		else
+			exit 1
+		fi
+	done
 	if test ! -z "${HR20ipAddress}" ; then
 		echo "Waiting 10 seconds to boot the HR20"
 		sleep 10
