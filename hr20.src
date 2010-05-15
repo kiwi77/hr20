@@ -1,0 +1,316 @@
+dnl ################################################################################
+dnl # This program is free software; you can redistribute it and/or modify it      #
+dnl # under the terms of the GNU General Public License (either version 2 or       #
+dnl # version 3) as published by the Free Software Foundation.                     #
+dnl #                                                                              #
+dnl # This program is distributed in the hope that it will be useful,              #
+dnl # but WITHOUT ANY WARRANTY; without even the implied warranty of               #
+dnl # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the                #
+dnl # GNU General Public License for more details.                                 #
+dnl #                                                                              #
+dnl # You should have received a copy of the GNU General Public License            #
+dnl # along with this program; if not, write to the Free Software                  #
+dnl # Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.                    #
+dnl #                                                                              #
+dnl # For more information on the GPL, please go to:                               #
+dnl # http://www.gnu.org/copyleft/gpl.html                                         #
+dnl #                                                                              #
+dnl #                                                                              #
+dnl # Programm Erstellung:                                                         #
+dnl #   Copyright (C) 2009-2010 - Michael Schultz <ethersex@keyb.de>               #
+dnl #                                                                              #
+dnl ################################################################################
+
+/* Fuses:       Extended        0xFF
+ *              High            0x9A
+ *              Low             0xFF
+ *http://frank.circleofcurrent.com/fusecalc/fusecalc.php?chip=atmega169&LOW=FF&HIGH=9A&EXTENDED=FF&LOCKBIT=FF
+ */
+
+
+
+#include <hardware/lcd/hr20.h>
+#include <hardware/adc/hr20-temp.h>
+#include <hardware/adc/hr20-batt.h>
+
+
+/* jump to bootloader = 512 words @atmega169 */
+void (*jump_boot)(void) = (void *)0x1E00;
+
+
+static uint8_t RXLine ;
+
+static uint16_t Message = 0 ;
+static uint16_t RingCount = 0 ;
+static uint16_t Int0Cnt = 0 ;
+static uint16_t Int0CntOld = 0 ;
+static uint16_t Int0RingCountOld = 0 ;
+static uint16_t Int0StopPos = 900 ;
+
+static uint8_t t1 ;		// Taste, Links,  Auto/Manu
+static uint8_t t2 ;		// Taste, Mitte,  Prog
+static uint8_t t3 ;		// Taste, Rechts, Temp
+static uint8_t t4 ;
+static uint8_t t5 ;
+static uint8_t Counter1 = 0 ;
+
+static uint16_t Counter2 = 0 ;
+
+static uint8_t rotate = 5 ;
+
+static uint8_t DisplayMode = 1;		//	Anzeige Modus
+static uint8_t DisplayChar0 ;
+static uint8_t DisplayChar1 ;
+static uint8_t DisplayChar2 ;
+static uint8_t DisplayChar3 ;
+static uint16_t BattSpannung;
+static uint16_t TempGrad;
+
+static uint8_t MotorMode = 0;
+#define MotRun		0
+#define MotOpen		1
+#define MotClose	2
+#define MotInit		3
+#define MotRun1		4
+#define MotRun2		5
+#define MotRun3		6
+#define MotRun4		7
+//########################################################################################################################
+void motor_off() {
+	PORTG &= ~_BV(PG3);		//	PORTG(PG3) = 0		Motor Aus
+	PORTG &= ~_BV(PG4);		//	PORTG(PG4) = 0		Motor Aus
+//	ECMD_AGAIN(snprintf_P(output, len, PSTR("MotorStopPos:%d"), Int0Cnt));
+	MotorMode = (0<<MotRun);
+}
+void motor_open() {
+	PORTG &= ~_BV(PG3);		//	PORTG(PG3) = 0		Motor Vorwärts ( Ventil Auf )
+	PORTG |=  _BV(PG4);		//	PORTG(PG4) = 1		Motor Vorwärts ( Ventil Auf )
+	MotorMode = (1<<MotRun);
+	Int0RingCountOld = RingCount ;
+	Int0Cnt = 0;
+	Int0CntOld = 0;
+}
+void motor_close() {
+	PORTG |=  _BV(PG3);		//	PORTG(PG3) = 1		Motor Rückwärts ( Ventil Zu )
+	PORTG &= ~_BV(PG4);		//	PORTG(PG4) = 0		Motor Rückwärts ( Ventil Zu )
+	MotorMode = (1<<MotRun);
+	Int0RingCountOld = RingCount ;
+	Int0Cnt = 0;
+	Int0CntOld = 0;
+}
+void motor_hang_check() {
+	if ( RingCount >= ( Int0RingCountOld + 6 ) || Int0Cnt > Int0StopPos ) {
+		motor_off();
+	} else {
+		if ( Int0Cnt > Int0CntOld ) {
+			Int0RingCountOld = RingCount ;
+			Int0CntOld = Int0Cnt ;
+		}
+	}
+	Counter2 = Int0Cnt;
+}
+//########################################################################################################################
+#include "protocols/ecmd/ecmd-base.h"
+int16_t parse_cmd_motor_stop(char *cmd, char *output, uint16_t len) {
+	while (*cmd == ' ')
+	cmd++;
+	if (*cmd == '\0') {
+		return ECMD_FINAL(snprintf_P(output, len, PSTR("%d"), Int0StopPos));
+	} else {
+		uint16_t NewInt0StopPos = strtoul(cmd, NULL, 10);
+		if (!NewInt0StopPos)
+			return ECMD_ERR_PARSE_ERROR;
+		Int0StopPos=NewInt0StopPos;
+		return ECMD_FINAL_OK;
+	}
+}
+int16_t parse_cmd_motor_pos(char *cmd, char *output, uint16_t len) {
+	return ECMD_FINAL(snprintf_P(output, len, PSTR("%d"), Int0Cnt));
+}
+int16_t parse_cmd_motor_open(char *cmd, char *output, uint16_t len) {
+	motor_open();
+	return ECMD_FINAL_OK;
+}
+int16_t parse_cmd_motor_close(char *cmd, char *output, uint16_t len) {
+	motor_close();
+	return ECMD_FINAL_OK;
+}
+//########################################################################################################################
+CONTROL_START
+
+	THREAD(DisplayOut)
+		BattSpannung=hr20_batt_get ();
+		TempGrad=hr20_temp_get ();
+
+		switch(DisplayMode) {
+		case 1:	// Anzeige Datum und uhrzeit
+			DisplayChar3=((CLOCK_HOUR / 10) % 10);
+			DisplayChar2=(CLOCK_HOUR % 10);
+			DisplayChar1=((CLOCK_MIN / 10) % 10);
+			DisplayChar0=(CLOCK_MIN % 10);
+			break;
+		case 2:	// Anzeige Batterie Spannung
+//			DisplayChar3=HR20_LCD_CHAR_SPACE;
+			DisplayChar3=HR20_LCD_CHAR_U;
+			DisplayChar2=((BattSpannung / 100) % 10);
+			DisplayChar1=((BattSpannung / 10)  % 10);
+			DisplayChar0=( BattSpannung        % 10);
+			LCD_SEG_CLEAR (LCD_SEG_COL1);
+			LCD_SEG_SET   (LCD_SEG_COL2);
+			break;
+		case 3:	// Anzeige Temperatur
+			DisplayChar3=((TempGrad / 100) % 10);
+			DisplayChar2=((TempGrad / 10)  % 10);
+			DisplayChar1=( TempGrad        % 10);
+			DisplayChar0=HR20_LCD_CHAR_DEG;
+			LCD_SEG_CLEAR (LCD_SEG_COL1);
+			LCD_SEG_SET   (LCD_SEG_COL2);
+			break;
+		case 4:	// Counter2 wert anzeige
+//			DisplayChar3=HR20_LCD_CHAR_SPACE;
+			DisplayChar3=((Counter2 / 1000) % 10);
+			DisplayChar2=((Counter2 / 100) % 10);
+			DisplayChar1=((Counter2 / 10) % 10);
+			DisplayChar0=(Counter2 % 10);
+			LCD_SEG_SET   (LCD_SEG_COL1);
+			LCD_SEG_SET   (LCD_SEG_COL2);
+		}
+		if ( DisplayMode >= 1 ) {
+			LCD_SEG_TOGGLE (LCD_SEG_COL1);
+			LCD_SEG_TOGGLE (LCD_SEG_COL2);
+			hr20_lcd_putchar(3, DisplayChar3);
+			hr20_lcd_putchar(2, DisplayChar2);
+			hr20_lcd_putchar(1, DisplayChar1);
+			hr20_lcd_putchar(0, DisplayChar0);
+		}
+		WAIT(1);
+	THREAD_END(DisplayOut)
+
+	ON STARTUP DO
+
+		// vorbereitung für tasten und wahlrad
+		DDRB = 0;
+		PORTB = (1<<PB7) | (1<<PB6) | (1<<PB3) | (1<<PB2) | (1<<PB1) | (1<<PB0);
+
+		// Lichtschranke vorbereiten
+		// DDRE   &= ~_BV(PE4);		// DDRE(PE4) = 0	Eingang Schalten für lichschranken ausgang
+		// PORTE  &= ~_BV(PE4);		// PORTE(PE4) = 0	Pullup deaktivieren für lichschranken ausgang
+		// DDRE   |=  _BV(PE2);		// DDRE(PE2) = 1	Lichtschranke pinne, vorbereiten
+		// DDRE   |=  _BV(PE3);		// DDRE(PE3) = 1	Lichtschranke pinne, vorbereiten
+		// PORTE  |=  _BV(PE2);		// PORTE(PE2) = 1	Lichtschranke aktivieren ( port output and high )
+		// PORTE  |=  _BV(PE3);		// PORTE(PE3) = 1	Lichtschranke aktivieren ( port output and high )
+		// PCMSK0 |=  _BV(PCINT4);		// PCMSK0(PCINT4) = 1	interrupt für den pin aktivieren
+		// EIMSK  |=  _BV(PCIE0);		// EIMSK(PCIE0) = 1	interrupt generell f.r pereferie 0 aktivieren
+
+		// Interrupt für Tasten und Wahlrad
+		// PCMSK1 |=  _BV(PCINT12);	dnl Interrupt aktivierung f.r wahlrad
+		// PCMSK1 |=  _BV(PCINT13);	dnl Interrupt aktivierung f.r wahlrad
+		// EIMSK  |=  _BV(PCIE1);		//	EIMSK(PCIE1) = 1	Pin Change Interrupt Enable 1
+
+		DDRE   = (1<<PE3)     | (1<<PE2);
+		PORTE  = (1<<PE3)     | (1<<PE2);
+		PCMSK0 = (1<<PCINT4);
+		PCMSK1 = (1<<PCINT12) | (1<<PCINT13);
+		EIMSK  = (1<<PCIE0)   | (1<<PCIE1);
+
+		RXLine = 1 ;
+
+		TCP_CONNECT(10.2.0.33, 95, message_handler);
+
+//		clock_set_time(1273785514);
+
+		THREAD_START(DisplayOut)
+	END
+
+	RingCount ++ ;
+	if ( RingCount >= 32768 ) { RingCount = 0 ; }
+
+	TCP_HANDLER_PERSIST(message_handler)
+	for (;;) {
+		if ( MotorMode == 0 ) {
+			TCP_SEND("Message=%d BattSpannung=%d TempGrad=%d\n", Message, BattSpannung, TempGrad);
+		}
+			Message ++;
+			if ( Message >= 32768 ) { Message = 0 ; }
+		WAIT(60);
+	}
+	TCP_HANDLER_END();
+	//########################################
+	if (!(PINB & 0b00000001)) {
+		t1 ++ ;
+		if ( t1 >= 251 ) { t1 = 250 ; }
+	} else {
+		t1=0 ;
+	}
+	if (!(PINB & 0b00000010)) {
+		t2 ++ ;
+		if ( t2 >= 251 ) { t2 = 250 ; }
+	} else {
+		t2=0 ;
+	}
+	if (!(PINB & 0b00000100)) {
+		t3 ++ ;
+		if ( t3 >= 251 ) { t3 = 250 ; }
+	} else {
+		t3=0 ;
+	}
+	//########################################
+	// Jump to Bootloader
+	if ( t1 == 100 && t3 == 100 ) {
+		jump_boot();
+	}
+	// motor_open
+	if ( t1 >= 10 ) {
+		motor_open();
+	}
+	// motor_close
+	if ( t3 >= 10 ) {
+		motor_close();
+	}
+	// 
+	if ( t2 >= 10 ) {
+		DisplayMode ++;
+		if ( DisplayMode >= 5 ) { DisplayMode = 0 ; }
+		t2 = 0;
+	}
+	if ( MotorMode >= 1 ) { motor_hang_check(); }
+	//########################################
+CONTROL_END
+//########################################################################################################################
+// Interrupt für dir motor Lichtschranke
+ISR(PCINT0_vect) {
+	Int0Cnt ++;
+}
+//########################################################################################################################
+// Interrupt für Tasten und Wahlrad
+ISR(PCINT1_vect) {
+	if (!(PINB & 0b00010000)) {	// PB4
+		t4 = 1 ;
+		if ( t4 >= 251 ) { t4 = 250 ; }
+	} else {
+		t4 = 0 ;
+	}
+	if (!(PINB & 0b00100000)) {	// PB5
+		t5 = 1 ;
+		if ( t5 >= 251 ) { t5 = 250 ; }
+	} else {
+		t5 = 0 ;
+	}
+	if ( t4 == 1 && t5 == 0 && rotate == 5 ) { rotate = 6 ; }
+	if ( t4 == 1 && t5 == 1 && rotate == 6 ) { rotate = 7 ; }
+	if ( t4 == 0 && t5 == 1 && rotate == 7 ) { rotate = 8 ; }
+	if ( t4 == 0 && t5 == 0 && rotate == 8 ) { rotate = 5 ; Counter1 ++ ; }
+	if ( t4 == 0 && t5 == 1 && rotate == 5 ) { rotate = 4 ; }
+	if ( t4 == 1 && t5 == 1 && rotate == 4 ) { rotate = 3 ; }
+	if ( t4 == 1 && t5 == 0 && rotate == 3 ) { rotate = 2 ; }
+	if ( t4 == 0 && t5 == 0 && rotate == 2 ) { rotate = 5 ; Counter1 -- ; }
+}
+//########################################################################################################################
+
+/*
+  -- Ethersex META --
+  ecmd_feature(motor_open, "motor open", Moror Open)
+  ecmd_feature(motor_close, "motor close", Moror Close)
+  ecmd_feature(motor_stop, "motor stop",[value], Display/Set the current thermy value.)
+  ecmd_feature(motor_pos, "motor pos", Moror Pos)
+*/
