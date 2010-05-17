@@ -27,46 +27,48 @@ dnl ############################################################################
  *http://frank.circleofcurrent.com/fusecalc/fusecalc.php?chip=atmega169&LOW=FF&HIGH=9A&EXTENDED=FF&LOCKBIT=FF
  */
 
-
-
 #include <hardware/lcd/hr20.h>
 #include <hardware/adc/hr20-temp.h>
 #include <hardware/adc/hr20-batt.h>
 
 
 /* jump to bootloader = 512 words @atmega169 */
-void (*jump_boot)(void) = (void *)0x1E00;
+void (*jump_boot)(void) = (void *)0x1E00 ;
 
-
+static uint8_t DisplayModeOld ;
 static uint8_t RXLine ;
 
 static uint16_t Message = 0 ;
 static uint16_t RingCount = 0 ;
-static uint16_t Int0Cnt = 0 ;
-static uint16_t Int0CntOld = 0 ;
-static uint16_t Int0RingCountOld = 0 ;
-static uint16_t Int0StopPos = 900 ;
+static uint16_t MotorPosAbsolutely = 300 ;
+static uint16_t MotorPosWant = 2000 ;
+static uint16_t MotorRingCountOld = 0 ;
+static uint16_t MotorInitPos1 ;
+static uint16_t MotorInitPos2 ;
+static uint16_t MotorInitPos3 ;
+static uint16_t MotorInitPos4 ;
 
-static uint8_t t1 ;		// Taste, Links,  Auto/Manu
-static uint8_t t2 ;		// Taste, Mitte,  Prog
-static uint8_t t3 ;		// Taste, Rechts, Temp
-static uint8_t t4 ;
-static uint8_t t5 ;
+
+static uint8_t Key1PressTime ;		// Taste, Links,  Auto/Manu
+static uint8_t Key2PressTime ;		// Taste, Mitte,  Prog
+static uint8_t Key3PressTime ;		// Taste, Rechts, Temp
+static uint8_t rad_a ;
+static uint8_t rad_b ;
 static uint8_t Counter1 = 0 ;
 
 static uint16_t Counter2 = 0 ;
 
 static uint8_t rotate = 5 ;
 
-static uint8_t DisplayMode = 1;		//	Anzeige Modus
+static uint8_t DisplayMode = 1 ;		//	Anzeige Modus
 static uint8_t DisplayChar0 ;
 static uint8_t DisplayChar1 ;
 static uint8_t DisplayChar2 ;
 static uint8_t DisplayChar3 ;
-static uint16_t BattSpannung;
-static uint16_t TempGrad;
+static uint16_t BattSpannung ;
+static uint16_t TempGrad ;
 
-static uint8_t MotorMode = 0;
+static uint8_t MotorMode = 0 ;
 #define MotRun		0
 #define MotOpen		1
 #define MotClose	2
@@ -75,57 +77,93 @@ static uint8_t MotorMode = 0;
 #define MotRun2		5
 #define MotRun3		6
 #define MotRun4		7
+
 //########################################################################################################################
-void motor_off() {
-	PORTG &= ~_BV(PG3);		//	PORTG(PG3) = 0		Motor Aus
-	PORTG &= ~_BV(PG4);		//	PORTG(PG4) = 0		Motor Aus
-//	ECMD_AGAIN(snprintf_P(output, len, PSTR("MotorStopPos:%d"), Int0Cnt));
-	MotorMode = (0<<MotRun);
-}
 void motor_open() {
 	PORTG &= ~_BV(PG3);		//	PORTG(PG3) = 0		Motor Vorwärts ( Ventil Auf )
 	PORTG |=  _BV(PG4);		//	PORTG(PG4) = 1		Motor Vorwärts ( Ventil Auf )
-	MotorMode = (1<<MotRun);
-	Int0RingCountOld = RingCount ;
-	Int0Cnt = 0;
-	Int0CntOld = 0;
+	MotorMode |= (1<<MotRun) | (1<<MotOpen);
+	MotorMode &= ~_BV(MotClose);	// MotClose = 0
+	MotorRingCountOld = RingCount ;
 }
 void motor_close() {
 	PORTG |=  _BV(PG3);		//	PORTG(PG3) = 1		Motor Rückwärts ( Ventil Zu )
 	PORTG &= ~_BV(PG4);		//	PORTG(PG4) = 0		Motor Rückwärts ( Ventil Zu )
-	MotorMode = (1<<MotRun);
-	Int0RingCountOld = RingCount ;
-	Int0Cnt = 0;
-	Int0CntOld = 0;
+	MotorMode |= (1<<MotRun) | (1<<MotClose);
+	MotorMode &= ~_BV(MotOpen);	// MotOpen = 0
+	MotorRingCountOld = RingCount ;
 }
-void motor_hang_check() {
-	if ( RingCount >= ( Int0RingCountOld + 6 ) || Int0Cnt > Int0StopPos ) {
-		motor_off();
-	} else {
-		if ( Int0Cnt > Int0CntOld ) {
-			Int0RingCountOld = RingCount ;
-			Int0CntOld = Int0Cnt ;
+void motor_off() {
+	PORTG &= ~_BV(PG3);		//	PORTG(PG3) = 0		Motor Aus
+	PORTG &= ~_BV(PG4);		//	PORTG(PG4) = 0		Motor Aus
+	MotorMode &= ~_BV(MotRun);	//	MotRun = 0
+	if ( MotorMode & ( 1 << MotInit ) ) {		// MotInit = 1
+		if ( MotorMode & ( 1 << MotOpen ) ) {		// MotOpen = 1
+			if ( MotorMode & ( 1 << MotRun1 ) ) {		// MotRun1 = 1
+				// Init Run, 1. step is finish, Full Open is reached
+				MotorPosAbsolutely = 1000;
+				MotorMode &= ~_BV(MotRun1);		// MotRun1 = 0
+				MotorMode |= (1<<MotRun2);		// MotRun2 = 1
+				motor_close();
+			} else if ( MotorMode & ( 1 << MotRun3 ) ) {	// MotRun3 = 1
+				// Init Run, 3. step is finish, Another Full Open is reached
+				MotorInitPos2 = MotorPosAbsolutely;
+				MotorPosAbsolutely = 1000;
+				MotorMode &= ~_BV(MotRun3);		// MotRun3 = 0
+				MotorMode |= (1<<MotRun4);		// MotRun4 = 1
+				motor_close();
+			} else {
+				// Init Run, 5. step is finish, The Last Full Open is reached
+				MotorInitPos4 = MotorPosAbsolutely;
+				MotorMode &= ~_BV(MotInit);		// MotInit = 0
+				MotorMode &= ~_BV(MotOpen);		// MotOpen = 0
+				DisplayMode=1;
+			}
+		} else if ( MotorMode & ( 1 << MotClose ) ) {		// MotClose = 1
+			if ( MotorMode & ( 1 << MotRun2 ) ) {
+				// Init Run, 2. step is finish, Full Close is reached
+				MotorInitPos1 = MotorPosAbsolutely;
+				MotorPosAbsolutely = 0;
+				MotorMode &= ~_BV(MotRun2);		// MotRun2 = 0
+				MotorMode |= (1<<MotRun3);		// MotRun3 = 1
+				motor_open();
+			} else if ( MotorMode & ( 1 << MotRun4 ) ) {	// MotRun4 = 1
+				// Init Run, 4. step is finish, Another Full Close is reached
+				MotorInitPos3 = MotorPosAbsolutely;
+				MotorPosAbsolutely = 0;
+				MotorMode &= ~_BV(MotRun4);		// MotRun4 = 0
+				motor_open();
+			}
 		}
 	}
-	Counter2 = Int0Cnt;
+}
+void motor_hang_check() {
+	if ( RingCount >= ( MotorRingCountOld + 7 ) ) {
+		motor_off();
+	} else {
+		if ( MotorMode & ( 1 << MotInit ) ) {} else {
+			if ( MotorMode & ( 1 << MotOpen  ) && MotorPosAbsolutely >= MotorPosWant ) { motor_off(); }
+			if ( MotorMode & ( 1 << MotClose ) && MotorPosAbsolutely <= MotorPosWant ) { motor_off(); }
+		}
+	}
 }
 //########################################################################################################################
 #include "protocols/ecmd/ecmd-base.h"
-int16_t parse_cmd_motor_stop(char *cmd, char *output, uint16_t len) {
+int16_t parse_cmd_motor_want(char *cmd, char *output, uint16_t len) {
 	while (*cmd == ' ')
 	cmd++;
 	if (*cmd == '\0') {
-		return ECMD_FINAL(snprintf_P(output, len, PSTR("%d"), Int0StopPos));
+		return ECMD_FINAL(snprintf_P(output, len, PSTR("%d"), MotorPosWant));
 	} else {
-		uint16_t NewInt0StopPos = strtoul(cmd, NULL, 10);
-		if (!NewInt0StopPos)
+		uint16_t NewMotorPosWant = strtoul(cmd, NULL, 10);
+		if (!NewMotorPosWant)
 			return ECMD_ERR_PARSE_ERROR;
-		Int0StopPos=NewInt0StopPos;
+		MotorPosWant=NewMotorPosWant;
 		return ECMD_FINAL_OK;
 	}
 }
 int16_t parse_cmd_motor_pos(char *cmd, char *output, uint16_t len) {
-	return ECMD_FINAL(snprintf_P(output, len, PSTR("%d"), Int0Cnt));
+	return ECMD_FINAL(snprintf_P(output, len, PSTR("%d"), MotorPosAbsolutely));
 }
 int16_t parse_cmd_motor_open(char *cmd, char *output, uint16_t len) {
 	motor_open();
@@ -166,18 +204,20 @@ CONTROL_START
 			LCD_SEG_CLEAR (LCD_SEG_COL1);
 			LCD_SEG_SET   (LCD_SEG_COL2);
 			break;
-		case 4:	// Counter2 wert anzeige
+//		case 4:	// Counter2 wert anzeige
 //			DisplayChar3=HR20_LCD_CHAR_SPACE;
-			DisplayChar3=((Counter2 / 1000) % 10);
-			DisplayChar2=((Counter2 / 100) % 10);
-			DisplayChar1=((Counter2 / 10) % 10);
-			DisplayChar0=(Counter2 % 10);
-			LCD_SEG_SET   (LCD_SEG_COL1);
-			LCD_SEG_SET   (LCD_SEG_COL2);
+//			DisplayChar3=((Counter2 / 1000) % 10);
+//			DisplayChar2=((Counter2 / 100) % 10);
+//			DisplayChar1=((Counter2 / 10) % 10);
+//			DisplayChar0=(Counter2 % 10);
+//			LCD_SEG_SET   (LCD_SEG_COL1);
+//			LCD_SEG_SET   (LCD_SEG_COL2);
 		}
 		if ( DisplayMode >= 1 ) {
-			LCD_SEG_TOGGLE (LCD_SEG_COL1);
-			LCD_SEG_TOGGLE (LCD_SEG_COL2);
+			if ( DisplayMode <= 9 ) {
+				LCD_SEG_TOGGLE (LCD_SEG_COL1);
+				LCD_SEG_TOGGLE (LCD_SEG_COL2);
+			}
 			hr20_lcd_putchar(3, DisplayChar3);
 			hr20_lcd_putchar(2, DisplayChar2);
 			hr20_lcd_putchar(1, DisplayChar1);
@@ -190,34 +230,37 @@ CONTROL_START
 
 		// vorbereitung für tasten und wahlrad
 		DDRB = 0;
-		PORTB = (1<<PB7) | (1<<PB6) | (1<<PB3) | (1<<PB2) | (1<<PB1) | (1<<PB0);
+		PORTB |= (1<<PB7) | (1<<PB6) | (1<<PB3) | (1<<PB2) | (1<<PB1) | (1<<PB0);
+
+		// test --> DDRE &= ~(_BV(PE4) | _BV(PE3));
 
 		// Lichtschranke vorbereiten
-		// DDRE   &= ~_BV(PE4);		// DDRE(PE4) = 0	Eingang Schalten für lichschranken ausgang
-		// PORTE  &= ~_BV(PE4);		// PORTE(PE4) = 0	Pullup deaktivieren für lichschranken ausgang
-		// DDRE   |=  _BV(PE2);		// DDRE(PE2) = 1	Lichtschranke pinne, vorbereiten
-		// DDRE   |=  _BV(PE3);		// DDRE(PE3) = 1	Lichtschranke pinne, vorbereiten
-		// PORTE  |=  _BV(PE2);		// PORTE(PE2) = 1	Lichtschranke aktivieren ( port output and high )
-		// PORTE  |=  _BV(PE3);		// PORTE(PE3) = 1	Lichtschranke aktivieren ( port output and high )
-		// PCMSK0 |=  _BV(PCINT4);		// PCMSK0(PCINT4) = 1	interrupt für den pin aktivieren
-		// EIMSK  |=  _BV(PCIE0);		// EIMSK(PCIE0) = 1	interrupt generell f.r pereferie 0 aktivieren
+		DDRE   &= ~_BV(PE4);		// DDRE(PE4) = 0	Eingang Schalten für lichschranken ausgang
+		PORTE  &= ~_BV(PE4);		// PORTE(PE4) = 0	Pullup deaktivieren für lichschranken ausgang
+		DDRE   |=  _BV(PE2);		// DDRE(PE2) = 1	Lichtschranke pinne, vorbereiten
+		DDRE   |=  _BV(PE3);		// DDRE(PE3) = 1	Lichtschranke pinne, vorbereiten
+		PORTE  |=  _BV(PE2);		// PORTE(PE2) = 1	Lichtschranke aktivieren ( port output and high )
+		PORTE  |=  _BV(PE3);		// PORTE(PE3) = 1	Lichtschranke aktivieren ( port output and high )
+		PCMSK0 |=  _BV(PCINT4);		// PCMSK0(PCINT4) = 1	interrupt für den pin aktivieren
+		EIMSK  |=  _BV(PCIE0);		// EIMSK(PCIE0) = 1	interrupt generell f.r pereferie 0 aktivieren
 
 		// Interrupt für Tasten und Wahlrad
-		// PCMSK1 |=  _BV(PCINT12);	dnl Interrupt aktivierung f.r wahlrad
-		// PCMSK1 |=  _BV(PCINT13);	dnl Interrupt aktivierung f.r wahlrad
-		// EIMSK  |=  _BV(PCIE1);		//	EIMSK(PCIE1) = 1	Pin Change Interrupt Enable 1
+		PCMSK1 |=  _BV(PCINT12);	// Interrupt aktivierung für wahlrad
+		PCMSK1 |=  _BV(PCINT13);	// Interrupt aktivierung für wahlrad
+		EIMSK  |=  _BV(PCIE1);		//	EIMSK(PCIE1) = 1	Pin Change Interrupt Enable 1
 
-		DDRE   = (1<<PE3)     | (1<<PE2);
-		PORTE  = (1<<PE3)     | (1<<PE2);
-		PCMSK0 = (1<<PCINT4);
-		PCMSK1 = (1<<PCINT12) | (1<<PCINT13);
-		EIMSK  = (1<<PCIE0)   | (1<<PCIE1);
+		DDRG |= (1<<PG3) | (1<<PG4);
+//		DDRE   = (1<<PE3)   | (1<<PE2);
+//		PORTE  = (1<<PE3)   | (1<<PE2);
+//		PCMSK0 = (1<<PCINT4);
+//		PCMSK1 = (1<<PB4)   | (1<<PB5);
+//		EIMSK  = (1<<PCIE0) | (1<<PCIE1);
 
 		RXLine = 1 ;
 
-		TCP_CONNECT(10.2.0.33, 95, message_handler);
+		TCP_CONNECT(10.2.0.33, 95, tcp_syslog_sending);
 
-//		clock_set_time(1273785514);
+//		clock_set_time(1703976120);		//	date --date="2023-12-30 23:42:00" +%s
 
 		THREAD_START(DisplayOut)
 	END
@@ -225,92 +268,103 @@ CONTROL_START
 	RingCount ++ ;
 	if ( RingCount >= 32768 ) { RingCount = 0 ; }
 
-	TCP_HANDLER_PERSIST(message_handler)
+	TCP_HANDLER_PERSIST(tcp_syslog_sending)
 	for (;;) {
 		if ( MotorMode == 0 ) {
-			TCP_SEND("Message=%d BattSpannung=%d TempGrad=%d\n", Message, BattSpannung, TempGrad);
+			TCP_SEND("%02d:%02d:%02d Message=%d BattSpannung=%d TempGrad=%d MotorInitPos=%d/%d/%d/%d %d %d\n", CLOCK_HOUR(), CLOCK_MIN(), CLOCK_SEC(), Message, BattSpannung, TempGrad, MotorInitPos1, MotorInitPos2, MotorInitPos3, MotorInitPos4, MotorPosAbsolutely, MotorMode);
 		}
 			Message ++;
 			if ( Message >= 32768 ) { Message = 0 ; }
-		WAIT(60);
+		WAIT(10);
 	}
-	TCP_HANDLER_END();
+	TCP_HANDLER_END(tcp_syslog_sending);
+	//########################################
+	//########## key press analysis ##########
 	//########################################
 	if (!(PINB & 0b00000001)) {
-		t1 ++ ;
-		if ( t1 >= 251 ) { t1 = 250 ; }
+		Key1PressTime ++ ;
+		if ( Key1PressTime >= 251 ) { Key1PressTime = 250 ; }
 	} else {
-		t1=0 ;
+		Key1PressTime=0 ;
 	}
 	if (!(PINB & 0b00000010)) {
-		t2 ++ ;
-		if ( t2 >= 251 ) { t2 = 250 ; }
+		Key2PressTime ++ ;
+		if ( Key2PressTime >= 251 ) { Key2PressTime = 250 ; }
 	} else {
-		t2=0 ;
+		Key2PressTime=0 ;
 	}
 	if (!(PINB & 0b00000100)) {
-		t3 ++ ;
-		if ( t3 >= 251 ) { t3 = 250 ; }
+		Key3PressTime ++ ;
+		if ( Key3PressTime >= 251 ) { Key3PressTime = 250 ; }
 	} else {
-		t3=0 ;
+		Key3PressTime=0 ;
 	}
 	//########################################
+
+	if ( Key1PressTime >= 100 && Key3PressTime >= 100 ) {
+		DisplayChar3=HR20_LCD_CHAR_A;
+		DisplayChar2=HR20_LCD_CHAR_D;
+		DisplayChar1=HR20_LCD_CHAR_A;
+		DisplayChar0=HR20_LCD_CHAR_P;
+		LCD_SEG_CLEAR (LCD_SEG_COL1);
+		LCD_SEG_CLEAR (LCD_SEG_COL2);
+		DisplayModeOld=DisplayMode;
+		DisplayMode=10;
+		MotorMode |= (1<<MotInit) | (1<<MotRun1);
+		motor_open();
+	}
+
 	// Jump to Bootloader
-	if ( t1 == 100 && t3 == 100 ) {
+	if ( Key1PressTime >= 250 && Key3PressTime >= 250 ) {
 		jump_boot();
 	}
 	// motor_open
-	if ( t1 >= 10 ) {
-		motor_open();
-	}
+//	if ( Key1PressTime >= 10 ) {
+//		motor_open();
+//	}
 	// motor_close
-	if ( t3 >= 10 ) {
-		motor_close();
-	}
-	// 
-	if ( t2 >= 10 ) {
+//	if ( Key3PressTime >= 10 ) {
+//		motor_close();
+//	}
+
+	if ( Key2PressTime >= 10 ) {
 		DisplayMode ++;
-		if ( DisplayMode >= 5 ) { DisplayMode = 0 ; }
-		t2 = 0;
+		if ( DisplayMode >= 4 ) { DisplayMode = 0 ; }
+		Key2PressTime = 0;
 	}
+
+
 	if ( MotorMode >= 1 ) { motor_hang_check(); }
 	//########################################
 CONTROL_END
 //########################################################################################################################
 // Interrupt für dir motor Lichtschranke
 ISR(PCINT0_vect) {
-	Int0Cnt ++;
+//	MotorPosCount ++;
+	if ( MotorMode & ( 1 << MotOpen  ) ) { MotorPosAbsolutely ++; }
+	if ( MotorMode & ( 1 << MotClose ) ) { MotorPosAbsolutely --; }
+	MotorRingCountOld = RingCount ;
 }
 //########################################################################################################################
-// Interrupt für Tasten und Wahlrad
+// Interrupt für Stellrad
 ISR(PCINT1_vect) {
-	if (!(PINB & 0b00010000)) {	// PB4
-		t4 = 1 ;
-		if ( t4 >= 251 ) { t4 = 250 ; }
-	} else {
-		t4 = 0 ;
-	}
-	if (!(PINB & 0b00100000)) {	// PB5
-		t5 = 1 ;
-		if ( t5 >= 251 ) { t5 = 250 ; }
-	} else {
-		t5 = 0 ;
-	}
-	if ( t4 == 1 && t5 == 0 && rotate == 5 ) { rotate = 6 ; }
-	if ( t4 == 1 && t5 == 1 && rotate == 6 ) { rotate = 7 ; }
-	if ( t4 == 0 && t5 == 1 && rotate == 7 ) { rotate = 8 ; }
-	if ( t4 == 0 && t5 == 0 && rotate == 8 ) { rotate = 5 ; Counter1 ++ ; }
-	if ( t4 == 0 && t5 == 1 && rotate == 5 ) { rotate = 4 ; }
-	if ( t4 == 1 && t5 == 1 && rotate == 4 ) { rotate = 3 ; }
-	if ( t4 == 1 && t5 == 0 && rotate == 3 ) { rotate = 2 ; }
-	if ( t4 == 0 && t5 == 0 && rotate == 2 ) { rotate = 5 ; Counter1 -- ; }
+	if (!(PINB & 0b00010000)) {	rad_a = 1 ;	} else {	rad_a = 0 ;	}
+	if (!(PINB & 0b00100000)) {	rad_b = 1 ;	} else {	rad_b = 0 ;	}
+	if ( rad_a == 1 && rad_b == 0 && rotate == 5 ) { rotate = 6 ; }
+	if ( rad_a == 1 && rad_b == 1 && rotate == 6 ) { rotate = 7 ; }
+	if ( rad_a == 0 && rad_b == 1 && rotate == 7 ) { rotate = 8 ; }
+	if ( rad_a == 0 && rad_b == 0 && rotate == 8 ) { rotate = 5 ; Counter1 ++ ; }	// Rechts Drehend
+	if ( rad_a == 0 && rad_b == 1 && rotate == 5 ) { rotate = 4 ; }
+	if ( rad_a == 1 && rad_b == 1 && rotate == 4 ) { rotate = 3 ; }
+	if ( rad_a == 1 && rad_b == 0 && rotate == 3 ) { rotate = 2 ; }
+	if ( rad_a == 0 && rad_b == 0 && rotate == 2 ) { rotate = 5 ; Counter1 -- ; }	// Links Drehend
 }
 //########################################################################################################################
 
 /*
   -- Ethersex META --
-  ecmd_feature(motor_open, "motor open", Moror Open)
-  ecmd_feature(motor_close, "motor close", Moror Close)
-  ecmd_feature(motor_stop, "motor stop",[value], Display/Set the current thermy value.)
-  ecmd_feature(motor_pos, "motor pos", Moror Pos)
+  ecmd_feature(motor_open, "motor open", Motor Open)
+  ecmd_feature(motor_close, "motor close", Motor Close)
+  ecmd_feature(motor_want, "motor want",[value], Display/Set the current motor want stop pos value.)
+  ecmd_feature(motor_pos, "motor pos", Motor Pos Absolutely)
 */
